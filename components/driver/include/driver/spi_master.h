@@ -65,6 +65,7 @@ typedef struct {
 #define SPI_TRANS_MODE_DIOQIO_ADDR    (1<<4)  ///< Also transmit address in mode selected by SPI_MODE_DIO/SPI_MODE_QIO
 #define SPI_TRANS_USE_RXDATA          (1<<2)  ///< Receive into rx_data member of spi_transaction_t instead into memory at rx_buffer.
 #define SPI_TRANS_USE_TXDATA          (1<<3)  ///< Transmit tx_data member of spi_transaction_t instead of data at tx_buffer. Do not set tx_buffer when using this.
+#define SPI_TRANS_OVERRIDE_BIT_PHASES (1<<4)  ///< Overrides the bit lengths of command, address and dummy bits using the transaction defined values
 
 /**
  * This structure describes one SPI transaction. The descriptor should not be modified until the transaction finishes.
@@ -87,8 +88,11 @@ struct spi_transaction_t {
     union {
         void *rx_buffer;            ///< Pointer to receive buffer, or NULL for no MISO phase. Written by 4 bytes-unit if DMA is used.
         uint8_t rx_data[4];         ///< If SPI_USE_RXDATA is set, data is received directly to this variable
-    };
-} ;        //the rx data should start from a 32-bit aligned address to get around dma issue.
+    };   //the rx data should start from a 32-bit aligned address to get around dma issue.
+    uint8_t command_bits;           ///< If SPI_TRANS_OVERRIDE_BIT_PHASES is set, overrides the number of command bits set in the device configuration for this transaction only
+    uint8_t address_bits;           ///< If SPI_TRANS_OVERRIDE_BIT_PHASES is set, overrides the number of address bits set in the device configuration for this transaction only
+    uint8_t dummy_bits;             ///< If SPI_TRANS_OVERRIDE_BIT_PHASES is set, overrides the number of dummy bits set in the device configuration for this transaction only
+};
 
 
 typedef struct spi_device_t* spi_device_handle_t;  ///< Handle for a device on a SPI bus
