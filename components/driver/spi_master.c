@@ -489,13 +489,6 @@ static void IRAM_ATTR spi_intr(void *arg)
                 host->hw->ctrl2.miso_delay_mode=nodelay?0:2;
             }
 
-            //Configure bit sizes, load addr and command
-            host->hw->user.usr_dummy=(dev->cfg.dummy_bits+extra_dummy)?1:0;
-            host->hw->user.usr_addr=(dev->cfg.address_bits)?1:0;
-            host->hw->user.usr_command=(dev->cfg.command_bits)?1:0;
-            host->hw->user1.usr_addr_bitlen=dev->cfg.address_bits-1;
-            host->hw->user1.usr_dummy_cyclelen=dev->cfg.dummy_bits+extra_dummy-1;
-            host->hw->user2.usr_command_bitlen=dev->cfg.command_bits-1;
             //Configure misc stuff
             host->hw->user.doutdin=(dev->cfg.flags & SPI_DEVICE_HALFDUPLEX)?0:1;
             host->hw->user.sio=(dev->cfg.flags & SPI_DEVICE_3WIRE)?1:0;
@@ -510,6 +503,24 @@ static void IRAM_ATTR spi_intr(void *arg)
             host->hw->pin.cs1_dis=(i==1)?0:1;
             host->hw->pin.cs2_dis=(i==2)?0:1;
         }
+        
+        //Configure bit sizes, load addr and command
+        if(trans->flags & SPI_TRANS_OVERRIDE_BIT_PHASES){
+          host->hw->user.usr_dummy=(trans->dummy_bits+extra_dummy)?1:0;
+          host->hw->user.usr_addr=(trans->address_bits)?1:0;
+          host->hw->user.usr_command=(trans->command_bits)?1:0;
+          host->hw->user1.usr_addr_bitlen=trans->address_bits-1;
+          host->hw->user1.usr_dummy_cyclelen=trans->dummy_bits+extra_dummy-1;
+          host->hw->user2.usr_command_bitlen=trans->command_bits-1;
+        } else {
+          host->hw->user.usr_dummy=(dev->cfg.dummy_bits+extra_dummy)?1:0;
+          host->hw->user.usr_addr=(dev->cfg.address_bits)?1:0;
+          host->hw->user.usr_command=(dev->cfg.command_bits)?1:0;
+          host->hw->user1.usr_addr_bitlen=dev->cfg.address_bits-1;
+          host->hw->user1.usr_dummy_cyclelen=dev->cfg.dummy_bits+extra_dummy-1;
+          host->hw->user2.usr_command_bitlen=dev->cfg.command_bits-1;
+        }
+        
         //Reset SPI peripheral
         host->hw->dma_conf.val |= SPI_OUT_RST|SPI_IN_RST|SPI_AHBM_RST|SPI_AHBM_FIFO_RST;
         host->hw->dma_out_link.start=0;
