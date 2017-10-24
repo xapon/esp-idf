@@ -598,16 +598,32 @@ static void IRAM_ATTR spi_intr(void *arg)
             host->hw->miso_dlen.usr_miso_dbitlen=trans->length-1;
         }
 
-        // output command will be sent from bit 7 to 0 of command_value, and then bit 15 to 8 of the same register field.
-        uint16_t command = trans->cmd << (16-dev->cfg.command_bits);    //shift to MSB
-        host->hw->user2.usr_command_value = (command>>8)|(command<<8);  //swap the first and second byte
-        // shift the address to MSB of addr (and maybe slv_wr_status) register. 
-        // output address will be sent from MSB to LSB of addr register, then comes the MSB to LSB of slv_wr_status register. 
-        if (dev->cfg.address_bits>32) {
-            host->hw->addr = trans->addr >> (dev->cfg.address_bits - 32);
-            host->hw->slv_wr_status = trans->addr << (64 - dev->cfg.address_bits);
+        if(trans->flags & SPI_TRANS_OVERRIDE_BIT_PHASES){
+          // output command will be sent from bit 7 to 0 of command_value, and then bit 15 to 8 of the same register field.
+          uint16_t command = trans->cmd << (16-trans->command_bits);    //shift to MSB
+          // host->hw->user2.usr_command_value = command;
+          host->hw->user2.usr_command_value = (command>>8)|(command<<8);  //swap the first and second byte
+          // shift the address to MSB of addr (and maybe slv_wr_status) register. 
+          // output address will be sent from MSB to LSB of addr register, then comes the MSB to LSB of slv_wr_status register. 
+          if (trans->address_bits>32) {
+              host->hw->addr = trans->addr >> (trans->address_bits - 32);
+              host->hw->slv_wr_status = trans->addr << (64 - trans->address_bits);
+          } else {
+              host->hw->addr = trans->addr << (32 - trans->address_bits);
+          }
         } else {
-            host->hw->addr = trans->addr << (32 - dev->cfg.address_bits);
+          // output command will be sent from bit 7 to 0 of command_value, and then bit 15 to 8 of the same register field.
+          uint16_t command = trans->cmd << (16-dev->cfg.command_bits);    //shift to MSB
+          // host->hw->user2.usr_command_value = command;
+          host->hw->user2.usr_command_value = (command>>8)|(command<<8);  //swap the first and second byte
+          // shift the address to MSB of addr (and maybe slv_wr_status) register. 
+          // output address will be sent from MSB to LSB of addr register, then comes the MSB to LSB of slv_wr_status register. 
+          if (dev->cfg.address_bits>32) {
+              host->hw->addr = trans->addr >> (dev->cfg.address_bits - 32);
+              host->hw->slv_wr_status = trans->addr << (64 - dev->cfg.address_bits);
+          } else {
+              host->hw->addr = trans->addr << (32 - dev->cfg.address_bits);
+          }
         }
         host->hw->user.usr_mosi=( (!(dev->cfg.flags & SPI_DEVICE_HALFDUPLEX) && trans_buf->buffer_to_rcv) || trans_buf->buffer_to_send)?1:0;
         host->hw->user.usr_miso=(trans_buf->buffer_to_rcv)?1:0;
