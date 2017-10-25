@@ -82,6 +82,9 @@ extern "C" {
 #include "esp_crosscore_int.h"
 
 
+#include <esp_heap_caps.h>
+#include "soc/soc_memory_layout.h"
+
 //#include "xtensa_context.h"
 
 /*-----------------------------------------------------------
@@ -121,12 +124,11 @@ typedef unsigned portBASE_TYPE	UBaseType_t;
 #include "portbenchmark.h"
 
 #include "sdkconfig.h"
-
-#define portFIRST_TASK_HOOK CONFIG_FREERTOS_BREAK_ON_SCHEDULER_START_JTAG
-
+#include "esp_attr.h"
 
 typedef struct {
-	volatile uint32_t mux;
+	uint32_t owner;
+	uint32_t count;
 #ifdef CONFIG_FREERTOS_PORTMUX_DEBUG
 	const char *lastLockedFn;
 	int lastLockedLine;
@@ -142,24 +144,23 @@ typedef struct {
   * The magic number in the top 16 bits is there so we can detect uninitialized and corrupted muxes.
   */
 
-#define portMUX_MAGIC_VAL		0xB33F0000
 #define portMUX_FREE_VAL		0xB33FFFFF
-#define portMUX_MAGIC_MASK		0xFFFF0000
-#define portMUX_MAGIC_SHIFT		16
-#define portMUX_CNT_MASK		0x0000FF00
-#define portMUX_CNT_SHIFT		8
-#define portMUX_VAL_MASK		0x000000FF
-#define portMUX_VAL_SHIFT		0
+
+/* Special constants for vPortCPUAcquireMutexTimeout() */
+#define portMUX_NO_TIMEOUT      (-1)  /* When passed for 'timeout_cycles', spin forever if necessary */
+#define portMUX_TRY_LOCK        0     /* Try to acquire the spinlock a single time only */
 
 //Keep this in sync with the portMUX_TYPE struct definition please.
 #ifndef CONFIG_FREERTOS_PORTMUX_DEBUG
-#define portMUX_INITIALIZER_UNLOCKED { 					\
-		.mux = portMUX_MAGIC_VAL|portMUX_FREE_VAL 		\
+#define portMUX_INITIALIZER_UNLOCKED {					\
+		.owner = portMUX_FREE_VAL,						\
+		.count = 0,										\
 	}
 #else
-#define portMUX_INITIALIZER_UNLOCKED { 					\
-		.mux = portMUX_MAGIC_VAL|portMUX_FREE_VAL, 		\
-		.lastLockedFn = "(never locked)", 				\
+#define portMUX_INITIALIZER_UNLOCKED {					\
+		.owner = portMUX_FREE_VAL,						\
+		.count = 0,										\
+		.lastLockedFn = "(never locked)",				\
 		.lastLockedLine = -1							\
 	}
 #endif
@@ -172,7 +173,7 @@ typedef struct {
 #define portASSERT_IF_IN_ISR()        vPortAssertIfInISR()
 void vPortAssertIfInISR();
 
-#define portCRITICAL_NESTING_IN_TCB 1 
+#define portCRITICAL_NESTING_IN_TCB 1
 
 /*
 Modifications to portENTER_CRITICAL:
@@ -193,31 +194,50 @@ do not disable the interrupts (because they already are).
 
 This all assumes that interrupts are either entirely disabled or enabled. Interrupr priority levels
 will break this scheme.
+
+Remark: For the ESP32, portENTER_CRITICAL and portENTER_CRITICAL_ISR both alias vTaskEnterCritical, meaning
+that either function can be called both from ISR as well as task context. This is not standard FreeRTOS 
+behaviour; please keep this in mind if you need any compatibility with other FreeRTOS implementations.
 */
 void vPortCPUInitializeMutex(portMUX_TYPE *mux);
 #ifdef CONFIG_FREERTOS_PORTMUX_DEBUG
 void vPortCPUAcquireMutex(portMUX_TYPE *mux, const char *function, int line);
-portBASE_TYPE vPortCPUReleaseMutex(portMUX_TYPE *mux, const char *function, int line);
+bool vPortCPUAcquireMutexTimeout(portMUX_TYPE *mux, int timeout_cycles, const char *function, int line);
+void vPortCPUReleaseMutex(portMUX_TYPE *mux, const char *function, int line);
+
+
 void vTaskEnterCritical( portMUX_TYPE *mux, const char *function, int line );
 void vTaskExitCritical( portMUX_TYPE *mux, const char *function, int line );
 #define portENTER_CRITICAL(mux)        vTaskEnterCritical(mux, __FUNCTION__, __LINE__)
 #define portEXIT_CRITICAL(mux)         vTaskExitCritical(mux, __FUNCTION__, __LINE__)
-#define portENTER_CRITICAL_ISR(mux)    vPortCPUAcquireMutex(mux, __FUNCTION__, __LINE__)
-#define portEXIT_CRITICAL_ISR(mux)    vPortCPUReleaseMutex(mux, __FUNCTION__, __LINE__)
+#define portENTER_CRITICAL_ISR(mux)    vTaskEnterCritical(mux, __FUNCTION__, __LINE__)
+#define portEXIT_CRITICAL_ISR(mux)     vTaskExitCritical(mux, __FUNCTION__, __LINE__)
 #else
 void vTaskExitCritical( portMUX_TYPE *mux );
 void vTaskEnterCritical( portMUX_TYPE *mux );
 void vPortCPUAcquireMutex(portMUX_TYPE *mux);
-portBASE_TYPE vPortCPUReleaseMutex(portMUX_TYPE *mux);
+
+/** @brief Acquire a portmux spinlock with a timeout
+ *
+ * @param mux Pointer to portmux to acquire.
+ * @param timeout_cycles Timeout to spin, in CPU cycles. Pass portMUX_NO_TIMEOUT to wait forever,
+ * portMUX_TRY_LOCK to try a single time to acquire the lock.
+ *
+ * @return true if mutex is successfully acquired, false on timeout.
+ */
+bool vPortCPUAcquireMutexTimeout(portMUX_TYPE *mux, int timeout_cycles);
+void vPortCPUReleaseMutex(portMUX_TYPE *mux);
+
 #define portENTER_CRITICAL(mux)        vTaskEnterCritical(mux)
 #define portEXIT_CRITICAL(mux)         vTaskExitCritical(mux)
-#define portENTER_CRITICAL_ISR(mux)    vPortCPUAcquireMutex(mux)
-#define portEXIT_CRITICAL_ISR(mux)    vPortCPUReleaseMutex(mux)
+#define portENTER_CRITICAL_ISR(mux)    vTaskEnterCritical(mux)
+#define portEXIT_CRITICAL_ISR(mux)     vTaskExitCritical(mux)
 #endif
 
 // Cleaner and preferred solution allows nested interrupts disabling and restoring via local registers or stack.
 // They can be called from interrupts too.
-//NOT SMP-COMPATIBLE! Use only if all you want is to disable the interrupts locally!
+// WARNING: This ONLY disables interrupt on the current CPU, meaning they cannot be used as a replacement for the vTaskExitCritical spinlock
+// on a multicore system. Only use if disabling interrupts on the current CPU only is indeed what you want.
 static inline unsigned portENTER_CRITICAL_NESTED() { unsigned state = XTOS_SET_INTLEVEL(XCHAL_EXCM_LEVEL); portbenchmarkINTERRUPT_DISABLE(); return state; }
 #define portEXIT_CRITICAL_NESTED(state)   do { portbenchmarkINTERRUPT_RESTORE(state); XTOS_RESTORE_JUST_INTLEVEL(state); } while (0)
 
@@ -225,6 +245,18 @@ static inline unsigned portENTER_CRITICAL_NESTED() { unsigned state = XTOS_SET_I
 #define portSET_INTERRUPT_MASK_FROM_ISR()            portENTER_CRITICAL_NESTED()
 #define portCLEAR_INTERRUPT_MASK_FROM_ISR(state)     portEXIT_CRITICAL_NESTED(state)
 
+//Because the ROM routines don't necessarily handle a stack in external RAM correctly, we force
+//the stack memory to always be internal.
+#define pvPortMallocTcbMem(size) heap_caps_malloc(size, MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)
+#define pvPortMallocStackMem(size)  heap_caps_malloc(size, MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)
+
+//xTaskCreateStatic uses these functions to check incoming memory.
+#define portVALID_TCB_MEM(ptr) (esp_ptr_internal(ptr) && esp_ptr_byte_accessible(ptr))
+#ifndef CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY
+#define portVALID_STACK_MEM(ptr) esp_ptr_byte_accessible(ptr)
+#else
+#define portVALID_STACK_MEM(ptr) (esp_ptr_internal(ptr) && esp_ptr_byte_accessible(ptr))
+#endif
 
 /*
  * Wrapper for the Xtensa compare-and-set instruction. This subroutine will atomically compare
@@ -236,9 +268,8 @@ static inline unsigned portENTER_CRITICAL_NESTED() { unsigned state = XTOS_SET_I
  * ESP32, though. (Would show up directly if it did because the magic wouldn't match.)
  */
 static inline void uxPortCompareSet(volatile uint32_t *addr, uint32_t compare, uint32_t *set) {
-    __asm__ __volatile__(
+    __asm__ __volatile__ (
         "WSR 	    %2,SCOMPARE1 \n"
-        "ISYNC      \n"
         "S32C1I     %0, %1, 0	 \n"
         :"=r"(*set)
         :"r"(addr), "r"(compare), "0"(*set)
@@ -262,7 +293,7 @@ static inline void uxPortCompareSet(volatile uint32_t *addr, uint32_t compare, u
 void vPortYield( void );
 void _frxt_setup_switch( void );
 #define portYIELD()					vPortYield()
-#define portYIELD_FROM_ISR()		_frxt_setup_switch()
+#define portYIELD_FROM_ISR()        {traceISR_EXIT_TO_SCHEDULER(); _frxt_setup_switch();}
 
 static inline uint32_t xPortGetCoreID();
 
@@ -312,6 +343,10 @@ typedef struct {
 	#define PRIVILEGED_FUNCTION
 	#define PRIVILEGED_DATA
 #endif
+
+
+void _xt_coproc_release(volatile void * coproc_sa_base);
+
 
 // porttrace
 #if configUSE_TRACE_FACILITY_2

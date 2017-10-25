@@ -24,6 +24,7 @@
 #include "rom/cache.h"
 #include "rom/uart.h"
 #include "soc/dport_reg.h"
+#include "soc/gpio_reg.h"
 #include "soc/efuse_reg.h"
 #include "soc/rtc_cntl_reg.h"
 #include "soc/timer_group_reg.h"
@@ -33,10 +34,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/xtensa_api.h"
+#include "esp_heap_caps.h"
 
 static const char* TAG = "system_api";
 
 static uint8_t base_mac_addr[6] = { 0 };
+
+#define SHUTDOWN_HANDLERS_NO 2
+static shutdown_handler_t shutdown_handlers[SHUTDOWN_HANDLERS_NO];
 
 void system_init()
 {
@@ -226,13 +231,28 @@ esp_err_t esp_read_mac(uint8_t* mac, esp_mac_type_t type)
     return ESP_OK;
 }
 
+esp_err_t esp_register_shutdown_handler(shutdown_handler_t handler)
+{
+     int i;
+     for (i = 0; i < SHUTDOWN_HANDLERS_NO; i++) {
+	  if (shutdown_handlers[i] == NULL) {
+	       shutdown_handlers[i] = handler;
+	       return ESP_OK;
+	  }
+     }
+     return ESP_FAIL;
+}
+
 void esp_restart_noos() __attribute__ ((noreturn));
 
 void IRAM_ATTR esp_restart(void)
 {
-#ifdef CONFIG_WIFI_ENABLED
-    esp_wifi_stop();
-#endif
+     int i;
+     for (i = 0; i < SHUTDOWN_HANDLERS_NO; i++) {
+	  if (shutdown_handlers[i]) {
+	       shutdown_handlers[i]();
+	  }
+     }
 
     // Disable scheduler on this core.
     vTaskSuspendAll();
@@ -246,19 +266,23 @@ void IRAM_ATTR esp_restart(void)
 */
 void IRAM_ATTR esp_restart_noos()
 {
-
     const uint32_t core_id = xPortGetCoreID();
     const uint32_t other_core_id = core_id == 0 ? 1 : 0;
     esp_cpu_stall(other_core_id);
 
+    // other core is now stalled, can access DPORT registers directly
+    esp_dport_access_int_pause();
+
     // We need to disable TG0/TG1 watchdogs
-    // First enable RTC watchdog to be on the safe side
+    // First enable RTC watchdog for 1 second
     REG_WRITE(RTC_CNTL_WDTWPROTECT_REG, RTC_CNTL_WDT_WKEY_VALUE);
     REG_WRITE(RTC_CNTL_WDTCONFIG0_REG,
             RTC_CNTL_WDT_FLASHBOOT_MOD_EN_M |
+            (RTC_WDT_STG_SEL_RESET_SYSTEM << RTC_CNTL_WDT_STG0_S) |
+            (RTC_WDT_STG_SEL_RESET_RTC << RTC_CNTL_WDT_STG1_S) |
             (1 << RTC_CNTL_WDT_SYS_RESET_LENGTH_S) |
             (1 << RTC_CNTL_WDT_CPU_RESET_LENGTH_S) );
-    REG_WRITE(RTC_CNTL_WDTCONFIG1_REG, 128000);
+    REG_WRITE(RTC_CNTL_WDTCONFIG1_REG, rtc_clk_slow_freq_get_hz() * 1);
 
     // Disable TG0/TG1 watchdogs
     TIMERG0.wdt_wprotect=TIMG_WDT_WKEY_VALUE;
@@ -274,6 +298,17 @@ void IRAM_ATTR esp_restart_noos()
     // Disable cache
     Cache_Read_Disable(0);
     Cache_Read_Disable(1);
+
+#ifdef CONFIG_SPIRAM_SUPPORT
+    //External SPI RAM reconfigures some GPIO functions in a way that is not entirely undone in the boot rom.
+    //Undo them manually so we reboot correctly.
+    WRITE_PERI_REG(GPIO_FUNC0_IN_SEL_CFG_REG, 0x30);
+    WRITE_PERI_REG(GPIO_FUNC1_IN_SEL_CFG_REG, 0x30);
+    WRITE_PERI_REG(GPIO_FUNC2_IN_SEL_CFG_REG, 0x30);
+    WRITE_PERI_REG(GPIO_FUNC3_IN_SEL_CFG_REG, 0x30);
+    WRITE_PERI_REG(GPIO_FUNC4_IN_SEL_CFG_REG, 0x30);
+    WRITE_PERI_REG(GPIO_FUNC5_IN_SEL_CFG_REG, 0x30);
+#endif
 
     // Flush any data left in UART FIFOs
     uart_tx_wait_idle(0);
@@ -296,6 +331,9 @@ void IRAM_ATTR esp_restart_noos()
     // Set CPU back to XTAL source, no PLL, same as hard reset
     rtc_clk_cpu_freq_set(RTC_CPU_FREQ_XTAL);
 
+    // Clear entry point for APP CPU
+    DPORT_REG_WRITE(DPORT_APPCPU_CTRL_D_REG, 0);
+
     // Reset CPUs
     if (core_id == 0) {
         // Running on PRO CPU: APP CPU is stalled. Can reset both CPUs.
@@ -303,10 +341,10 @@ void IRAM_ATTR esp_restart_noos()
                 RTC_CNTL_SW_PROCPU_RST_M | RTC_CNTL_SW_APPCPU_RST_M);
     } else {
         // Running on APP CPU: need to reset PRO CPU and unstall it,
-        // then stall APP CPU
+        // then reset APP CPU
         SET_PERI_REG_MASK(RTC_CNTL_OPTIONS0_REG, RTC_CNTL_SW_PROCPU_RST_M);
         esp_cpu_unstall(0);
-        esp_cpu_stall(1);
+        SET_PERI_REG_MASK(RTC_CNTL_OPTIONS0_REG, RTC_CNTL_SW_APPCPU_RST_M);
     }
     while(true) {
         ;
@@ -320,9 +358,14 @@ void system_restore(void)
     esp_wifi_restore();
 }
 
-uint32_t esp_get_free_heap_size(void)
+uint32_t esp_get_free_heap_size( void )
 {
-    return xPortGetFreeHeapSize();
+    return heap_caps_get_free_size( MALLOC_CAP_DEFAULT );
+}
+
+uint32_t esp_get_minimum_free_heap_size( void )
+{
+    return heap_caps_get_minimum_free_size( MALLOC_CAP_DEFAULT );
 }
 
 uint32_t system_get_free_heap_size(void) __attribute__((alias("esp_get_free_heap_size")));
@@ -339,6 +382,7 @@ const char* esp_get_idf_version(void)
 
 static void get_chip_info_esp32(esp_chip_info_t* out_info)
 {
+    out_info->model = CHIP_ESP32;
     uint32_t reg = REG_READ(EFUSE_BLK0_RDATA3_REG);
     memset(out_info, 0, sizeof(*out_info));
     if ((reg & EFUSE_RD_CHIP_VER_REV1_M) != 0) {

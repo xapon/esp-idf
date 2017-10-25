@@ -84,7 +84,7 @@ This example "myProject" contains the following elements:
 
 - Optional "components" directory contains components that are part of the project. A project does not have to contain custom components of this kind, but it can be useful for structuring reusable code or including third party components that aren't part of ESP-IDF.
 
-- "main" directory is a special "pseudo-component" that contains source code for the project itself. "main" is a default name, the Makefile variable ``SRCDIRS`` defaults to this but can be set to look for pseudo-components in other directories.
+- "main" directory is a special "pseudo-component" that contains source code for the project itself. "main" is a default name, the Makefile variable ``COMPONENT_DIRS`` includes this component but you can modify this variable (or set ``EXTRA_COMPONENT_DIRS``) to look for components in other places.
 
 - "build" directory is where build output is created. After the make process is run, this directory will contain interim object files and libraries as well as final binary output files. This directory is usually not added to source control or distributed with the project source code.
 
@@ -120,18 +120,36 @@ These variables all have default values that can be overridden for custom behavi
 
 - ``PROJECT_PATH``: Top-level project directory. Defaults to the directory containing the Makefile. Many other project variables are based on this variable. The project path cannot contain spaces.
 - ``BUILD_DIR_BASE``: The build directory for all objects/libraries/binaries. Defaults to ``$(PROJECT_PATH)/build``.
-- ``COMPONENT_DIRS``: Directories to search for components. Defaults to `$(IDF_PATH)/components`, `$(PROJECT_PATH)/components` and ``EXTRA_COMPONENT_DIRS``. Override this variable if you don't want to search for components in the esp-idf & project ``components`` directories.
-- ``EXTRA_COMPONENT_DIRS``: Optional list of additional directories to search for components. Components themselves are in sub-directories of these directories, this is a top-level directory containing the component directories.
+- ``COMPONENT_DIRS``: Directories to search for components. Defaults to `$(IDF_PATH)/components`, `$(PROJECT_PATH)/components`, ``$(PROJECT_PATH)/main`` and ``EXTRA_COMPONENT_DIRS``. Override this variable if you don't want to search for components in these places.
+- ``EXTRA_COMPONENT_DIRS``: Optional list of additional directories to search for components.
 - ``COMPONENTS``: A list of component names to build into the project. Defaults to all components found in the COMPONENT_DIRS directories.
-- ``SRCDIRS``: Directories under the main project directory which contain project-specific "pseudo-components". Defaults to 'main'. The difference between specifying a directory here and specifying it under ``EXTRA_COMPONENT_DIRS`` is that a directory in ``SRCDIRS`` is a component itself (contains a file "component.mk"), whereas a directory in ``EXTRA_COMPONENT_DIRS`` contains component directories which contain a file "component.mk". See the `Example Project` for a concrete case of this.
 
+Any paths in these Makefile variables should be absolute paths. You can convert relative paths using ``$(PROJECT_PATH)/xxx``, ``$(IDF_PATH)/xxx``, or use the Make function ``$(abspath xxx)``.
+
+These variables should all be set before the line ``include $(IDF_PATH)/make/project.mk`` in the Makefile.
 
 Component Makefiles
 -------------------
 
 Each project contains one or more components, which can either be part of esp-idf or added from other component directories.
 
-A component is any sub-directory that contains a `component.mk` file [#f1]_.
+A component is any directory that contains a ``component.mk`` file.
+
+Searching for Components
+------------------------
+
+The list of directories in ``COMPONENT_DIRS`` is searched for the project's components. Directories in this list can either be components themselves (ie they contain a `component.mk` file), or they can be top-level directories whose subdirectories are components.
+
+Running the ``make list-components`` target dumps many of these variables and can help debug the discovery of component directories.
+
+Multiple components with the same name
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When esp-idf is collecting all the components to compile, it will do this in the order specified by ``COMPONENT_DIRS``; by default, this means the 
+idf components first, the project components second and optionally the components in ``EXTRA_COMPONENT_DIRS`` last. If two or more of these directories
+contain component subdirectories with the same name, the component in the last place searched is used. This allows, for example, overriding esp-idf components 
+with a modified version by simply copying the component from the esp-idf component directory to the project component tree and then modifying it there. 
+If used in this way, the esp-idf directory itself can remain untouched.
 
 Minimal Component Makefile
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -230,10 +248,15 @@ The following variables can be set inside ``component.mk`` to control the build 
   directory, of any files that are generated using custom make rules
   in the component.mk file and which need to be removed as part of
   ``make clean``. See `Source Code Generation` for an example.
-- ``COMPONENT_OWNBUILDTARGET`` & `COMPONENT_OWNCLEANTARGET`: These
+- ``COMPONENT_OWNBUILDTARGET`` & ``COMPONENT_OWNCLEANTARGET``: These
   targets allow you to fully override the default build behaviour for
   the component. See `Fully Overriding The Component Makefile` for
   more details.
+- ``COMPONENT_CONFIG_ONLY``: If set, this flag indicates that the component
+  produces no built output at all (ie ``COMPONENT_LIBRARY`` is not built),
+  and most other component variables are ignored. This flag is used for IDF
+  internal components which contain only ``KConfig.projbuild`` and/or
+  ``Makefile.projbuild`` files to configure the project, but no source files.
 - ``CFLAGS``: Flags passed to the C compiler. A default set of
   ``CFLAGS`` is defined based on project settings. Component-specific
   additions can be made via ``CFLAGS +=``. It is also possible
@@ -328,6 +351,17 @@ Some tips for debugging the esp-idf build system:
 
 For more debugging tips and general make information, see the `GNU Make Manual`.
 
+.. _warn-undefined-variables:
+
+Warning On Undefined Variables
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+By default, the build process will print a warning if an undefined variable is referenced (like ``$(DOES_NOT_EXIST)``). This can be useful to find errors in variable names.
+
+If you don't want this behaviour, it can be disabled in menuconfig's top level menu under `SDK tool configuration`.
+
+Note that this option doesn't trigger a warning if ``ifdef`` or ``ifndef`` are used in Makefiles.
+
 Overriding Parts of the Project
 -------------------------------
 
@@ -351,11 +385,15 @@ Take care when setting variables or targets in this file. As the values are incl
 KConfig.projbuild
 ^^^^^^^^^^^^^^^^^
 
-This is an equivalent to `Makefile.projbuild` for `component configuration` KConfig files. If you want to include
+This is an equivalent to ``Makefile.projbuild`` for `component configuration` KConfig files. If you want to include
 configuration options at the top-level of menuconfig, rather than inside the "Component Configuration" sub-menu, then these can be defined in the KConfig.projbuild file alongside the ``component.mk`` file.
 
 Take care when adding configuration values in this file, as they will be included across the entire project configuration. Where possible, it's generally better to create a KConfig file for `component configuration`.
 
+Configuration-Only Components
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Some special components which contain no source files, only ``Kconfig.projbuild`` and ``Makefile.projbuild``, may set the flag ``COMPONENT_CONFIG_ONLY`` in the component.mk file. If this flag is set, most other component variables are ignored and no build step is run for the component.
 
 Example Component Makefiles
 ---------------------------
@@ -396,7 +434,8 @@ Adding conditional configuration
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The configuration system can be used to conditionally compile some files
-depending on the options selected in ``make menuconfig``:
+depending on the options selected in ``make menuconfig``. For this, ESP-IDF
+has the compile_only_if and compile_only_if_not macros:
 
 ``Kconfig``::
 
@@ -407,14 +446,56 @@ depending on the options selected in ``make menuconfig``:
 
 ``component.mk``::
 
-    COMPONENT_OBJS := foo_a.o foo_b.o
+    $(call compile_only_if,$(CONFIG_FOO_ENABLE_BAR),bar.o)
 
-    ifdef CONFIG_FOO_BAR
-    COMPONENT_OBJS += foo_bar.o foo_bar_interface.o
-    endif
 
-See the `GNU Make Manual` for conditional syntax that can be used use in makefiles.
+As can be seen in the example, the ``compile_only_if`` macro takes a condition and a 
+list of object files as parameters. If the condition is true (in this case: if the
+BAR feature is enabled in menuconfig) the object files (in this case: bar.o) will
+always be compiled. The opposite goes as well: if the condition is not true, bar.o 
+will never be compiled. ``compile_only_if_not`` does the opposite: compile if the 
+condition is false, not compile if the condition is true.
 
+This can also be used to select or stub out an implementation, as such:
+
+``Kconfig``::
+
+    config ENABLE_LCD_OUTPUT
+        bool "Enable LCD output."
+        help
+            Select this if your board has a LCD.
+
+    config ENABLE_LCD_CONSOLE
+        bool "Output console text to LCD"
+        depends on ENABLE_LCD_OUTPUT
+        help
+            Select this to output debugging output to the lcd
+
+    config ENABLE_LCD_PLOT
+        bool "Output temperature plots to LCD"
+        depends on ENABLE_LCD_OUTPUT
+        help
+            Select this to output temperature plots
+
+
+``component.mk``::
+
+    # If LCD is enabled, compile interface to it, otherwise compile dummy interface
+    $(call compile_only_if,$(CONFIG_ENABLE_LCD_OUTPUT),lcd-real.o lcd-spi.o)
+    $(call compile_only_if_not,$(CONFIG_ENABLE_LCD_OUTPUT),lcd-dummy.o)
+
+    #We need font if either console or plot is enabled
+    $(call compile_only_if,$(or $(CONFIG_ENABLE_LCD_CONSOLE),$(CONFIG_ENABLE_LCD_PLOT)), font.o)
+
+Note the use of the Make 'or' function to include the font file. Other substitution functions,
+like 'and' and 'if' will also work here. Variables that do not come from menuconfig can also 
+be used: ESP-IDF uses the default Make policy of judging a variable which is empty or contains 
+only whitespace to be false while a variable with any non-whitespace in it is true.
+
+(Note: Older versions of this document advised conditionally adding object file names to
+``COMPONENT_OBJS``. While this still is possible, this will only work when all object 
+files for a component are named explicitely, and will not clean up deselected object files
+in a ``make clean`` pass.)
 
 Source Code Generation
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -491,13 +572,14 @@ target. The build target can do anything as long as it creates
 $(COMPONENT_LIBRARY) for the project make process to link into the app binary.
 
 (Actually, even this is not strictly necessary - if the COMPONENT_ADD_LDFLAGS variable
-is set then the component can instruct the linker to link other binaries instead.)
+is overridden then the component can instruct the linker to link other binaries instead.)
 
 
 .. _esp-idf-template: https://github.com/espressif/esp-idf-template
 .. _GNU Make Manual: https://www.gnu.org/software/make/manual/make.html
-.. [#f1] Actually, some components in esp-idf are "pure configuration" components that don't have a component.mk file, only a Makefile.projbuild and/or Kconfig.projbuild file. However, these components are unusual and most components have a component.mk file.
 
+
+.. _custom-sdkconfig-defaults:
 
 Custom sdkconfig defaults
 -------------------------
@@ -514,7 +596,7 @@ There're some scenarios that we want to flash the target board without IDF. For 
 
     print_flash_cmd:
         echo $(ESPTOOL_WRITE_FLASH_OPTIONS) $(ESPTOOL_ALL_FLASH_ARGS) | sed -e 's:'$(PWD)/build/'::g'
-    
+
 the original ESPTOOL_ALL_FLASH_ARGS are absolute file name. Usually we want to save relative file name so we can move the bin folder to somewhere else. For this case we can use ``sed`` to convert to relative file name, like what we did in the example above.
 
 When running ``make print_flash_cmd``, it will print the flash arguments::
@@ -525,3 +607,11 @@ Then use flash arguments as the arguemnts for esptool write_flash arguments::
 
     python esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 --before default_reset --after hard_reset write_flash -z --flash_mode dio --flash_freq 40m --flash_size detect 0x1000 bootloader/bootloader.bin 0x10000 example_app.bin 0x8000 partition_table_unit_test_app.bin
 
+Building the Bootloader
+=======================
+
+The bootloader is built by default as part of "make all", or can be built standalone via "make bootloader-clean". There is also "make bootloader-list-components" to see the components included in the bootloader build.
+
+The component in IDF components/bootloader is special, as the second stage bootloader is a separate .ELF and .BIN file to the main project. However it shares its configuration and build directory with the main project.
+
+This is accomplished by adding a subproject under components/bootloader/subproject. This subproject has its own Makefile, but it expects to be called from the project's own Makefile via some glue in the components/bootloader/Makefile.projectbuild file. See these files for more details.

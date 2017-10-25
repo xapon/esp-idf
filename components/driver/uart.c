@@ -18,6 +18,7 @@
 #include "esp_intr_alloc.h"
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_clk.h"
 #include "malloc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -28,6 +29,9 @@
 #include "soc/uart_struct.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
+
+#define XOFF (char)0x13
+#define XON (char)0x11
 
 static const char* UART_TAG = "uart";
 #define UART_CHECK(a, str, ret_val) \
@@ -169,13 +173,25 @@ esp_err_t uart_get_parity(uart_port_t uart_num, uart_parity_t* parity_mode)
 esp_err_t uart_set_baudrate(uart_port_t uart_num, uint32_t baud_rate)
 {
     UART_CHECK((uart_num < UART_NUM_MAX), "uart_num error", ESP_FAIL);
-    UART_CHECK((baud_rate < UART_BITRATE_MAX), "baud_rate error", ESP_FAIL);
-    uint32_t clk_div = (((UART_CLK_FREQ) << 4) / baud_rate);
+    esp_err_t ret = ESP_OK;
     UART_ENTER_CRITICAL(&uart_spinlock[uart_num]);
-    UART[uart_num]->clk_div.div_int = clk_div >> 4;
-    UART[uart_num]->clk_div.div_frag = clk_div & 0xf;
+    int uart_clk_freq;
+    if (UART[uart_num]->conf0.tick_ref_always_on == 0) {
+        /* this UART has been configured to use REF_TICK */
+        uart_clk_freq = REF_CLK_FREQ;
+    } else {
+        uart_clk_freq = esp_clk_apb_freq();
+    }
+    uint32_t clk_div = (((uart_clk_freq) << 4) / baud_rate);
+    if (clk_div < 16) {
+        /* baud rate is too high for this clock frequency */
+        ret = ESP_ERR_INVALID_ARG;
+    } else {
+        UART[uart_num]->clk_div.div_int = clk_div >> 4;
+        UART[uart_num]->clk_div.div_frag = clk_div & 0xf;
+    }
     UART_EXIT_CRITICAL(&uart_spinlock[uart_num]);
-    return ESP_OK;
+    return ret;
 }
 
 esp_err_t uart_get_baudrate(uart_port_t uart_num, uint32_t* baudrate)
@@ -191,10 +207,26 @@ esp_err_t uart_get_baudrate(uart_port_t uart_num, uint32_t* baudrate)
 esp_err_t uart_set_line_inverse(uart_port_t uart_num, uint32_t inverse_mask)
 {
     UART_CHECK((uart_num < UART_NUM_MAX), "uart_num error", ESP_FAIL);
-    UART_CHECK((((inverse_mask & ~UART_LINE_INV_MASK) == 0) && (inverse_mask != 0)), "inverse_mask error", ESP_FAIL);
+    UART_CHECK((((inverse_mask & ~UART_LINE_INV_MASK) == 0) || (inverse_mask == 0)), "inverse_mask error", ESP_FAIL);
     UART_ENTER_CRITICAL(&uart_spinlock[uart_num]);
     CLEAR_PERI_REG_MASK(UART_CONF0_REG(uart_num), UART_LINE_INV_MASK);
     SET_PERI_REG_MASK(UART_CONF0_REG(uart_num), inverse_mask);
+    UART_EXIT_CRITICAL(&uart_spinlock[uart_num]);
+    return ESP_OK;
+}
+
+esp_err_t uart_set_sw_flow_ctrl(uart_port_t uart_num, bool enable,  uint8_t rx_thresh_xon,  uint8_t rx_thresh_xoff)
+{
+    UART_CHECK((uart_num < UART_NUM_MAX), "uart_num error", ESP_FAIL);
+    UART_CHECK((rx_thresh_xon < UART_FIFO_LEN), "rx flow xon thresh error", ESP_FAIL);
+    UART_CHECK((rx_thresh_xoff < UART_FIFO_LEN), "rx flow xon thresh error", ESP_FAIL);
+    UART_ENTER_CRITICAL(&uart_spinlock[uart_num]);
+    UART[uart_num]->flow_conf.sw_flow_con_en = enable? 1:0;
+    UART[uart_num]->flow_conf.xonoff_del = enable?1:0;
+    UART[uart_num]->swfc_conf.xon_threshold =  rx_thresh_xon;
+    UART[uart_num]->swfc_conf.xoff_threshold =  rx_thresh_xoff;
+    UART[uart_num]->swfc_conf.xon_char = XON;
+    UART[uart_num]->swfc_conf.xoff_char = XOFF;
     UART_EXIT_CRITICAL(&uart_spinlock[uart_num]);
     return ESP_OK;
 }
@@ -394,7 +426,7 @@ esp_err_t uart_set_pin(uart_port_t uart_num, int tx_io_num, int rx_io_num, int r
     }
     if(tx_io_num >= 0) {
         PIN_FUNC_SELECT(GPIO_PIN_MUX_REG[tx_io_num], PIN_FUNC_GPIO);
-        gpio_set_direction(tx_io_num, GPIO_MODE_OUTPUT);
+        gpio_set_level(tx_io_num, 1);
         gpio_matrix_out(tx_io_num, tx_sig, 0, 0);
     }
 
@@ -424,7 +456,7 @@ esp_err_t uart_set_rts(uart_port_t uart_num, int level)
     UART_CHECK((UART[uart_num]->conf1.rx_flow_en != 1), "disable hw flowctrl before using sw control", ESP_FAIL);
     UART_ENTER_CRITICAL(&uart_spinlock[uart_num]);
     UART[uart_num]->conf0.sw_rts = level & 0x1;
-    UART_ENTER_CRITICAL(&uart_spinlock[uart_num]);
+    UART_EXIT_CRITICAL(&uart_spinlock[uart_num]);
     return ESP_OK;
 }
 
@@ -433,12 +465,13 @@ esp_err_t uart_set_dtr(uart_port_t uart_num, int level)
     UART_CHECK((uart_num < UART_NUM_MAX), "uart_num error", ESP_FAIL);
     UART_ENTER_CRITICAL(&uart_spinlock[uart_num]);
     UART[uart_num]->conf0.sw_dtr = level & 0x1;
-    UART_ENTER_CRITICAL(&uart_spinlock[uart_num]);
+    UART_EXIT_CRITICAL(&uart_spinlock[uart_num]);
     return ESP_OK;
 }
 
 esp_err_t uart_param_config(uart_port_t uart_num, const uart_config_t *uart_config)
 {
+    esp_err_t r;
     UART_CHECK((uart_num < UART_NUM_MAX), "uart_num error", ESP_FAIL);
     UART_CHECK((uart_config), "param null", ESP_FAIL);
     if(uart_num == UART_NUM_0) {
@@ -448,16 +481,19 @@ esp_err_t uart_param_config(uart_port_t uart_num, const uart_config_t *uart_conf
     } else if(uart_num == UART_NUM_2) {
         periph_module_enable(PERIPH_UART2_MODULE);
     }
-    uart_set_hw_flow_ctrl(uart_num, uart_config->flow_ctrl, uart_config->rx_flow_ctrl_thresh);
-    uart_set_baudrate(uart_num, uart_config->baud_rate);
+    r = uart_set_hw_flow_ctrl(uart_num, uart_config->flow_ctrl, uart_config->rx_flow_ctrl_thresh);
+    if (r != ESP_OK) return r;
 
-    UART[uart_num]->conf0.val = (
-        (uart_config->parity << UART_PARITY_S)
-            | (uart_config->data_bits << UART_BIT_NUM_S)
-            | ((uart_config->flow_ctrl & UART_HW_FLOWCTRL_CTS) ? UART_TX_FLOW_EN : 0x0)
-            | UART_TICK_REF_ALWAYS_ON_M);
-    uart_set_stop_bits(uart_num, uart_config->stop_bits);
-    return ESP_OK;
+    UART[uart_num]->conf0.val =
+          (uart_config->parity << UART_PARITY_S)
+        | (uart_config->data_bits << UART_BIT_NUM_S)
+        | ((uart_config->flow_ctrl & UART_HW_FLOWCTRL_CTS) ? UART_TX_FLOW_EN : 0x0)
+        | (uart_config->use_ref_tick ? 0 : UART_TICK_REF_ALWAYS_ON_M);
+
+    r = uart_set_baudrate(uart_num, uart_config->baud_rate);
+    if (r != ESP_OK) return r;
+    r = uart_set_stop_bits(uart_num, uart_config->stop_bits);
+    return r;
 }
 
 esp_err_t uart_intr_config(uart_port_t uart_num, const uart_intr_config_t *intr_conf)
@@ -616,7 +652,6 @@ static void uart_rx_intr_handler_default(void *param)
                 uart_reg->int_clr.rxfifo_tout = 1;
                 uart_reg->int_clr.rxfifo_full = 1;
                 UART_EXIT_CRITICAL_ISR(&uart_spinlock[uart_num]);
-                uart_event.type = UART_DATA;
                 uart_event.size = rx_fifo_len;
                 //If we fail to push data to ring buffer, we will have to stash the data, and send next time.
                 //Mainly for applications that uses flow control or small ring buffer.
@@ -853,7 +888,7 @@ int uart_write_bytes_with_break(uart_port_t uart_num, const char* src, size_t si
 int uart_read_bytes(uart_port_t uart_num, uint8_t* buf, uint32_t length, TickType_t ticks_to_wait)
 {
     UART_CHECK((uart_num < UART_NUM_MAX), "uart_num error", (-1));
-    UART_CHECK((buf), "uart_num error", (-1));
+    UART_CHECK((buf), "uart data null", (-1));
     UART_CHECK((p_uart_obj[uart_num]), "uart driver error", (-1));
     uint8_t* data = NULL;
     size_t size;
@@ -968,8 +1003,12 @@ esp_err_t uart_flush(uart_port_t uart_num)
 
 esp_err_t uart_driver_install(uart_port_t uart_num, int rx_buffer_size, int tx_buffer_size, int queue_size, QueueHandle_t *uart_queue, int intr_alloc_flags)
 {
+    esp_err_t r;
     UART_CHECK((uart_num < UART_NUM_MAX), "uart_num error", ESP_FAIL);
     UART_CHECK((rx_buffer_size > UART_FIFO_LEN), "uart rx buffer length error(>128)", ESP_FAIL);
+    UART_CHECK((tx_buffer_size > UART_FIFO_LEN) || (tx_buffer_size == 0), "uart tx buffer length error(>128 or 0)", ESP_FAIL);
+    UART_CHECK((intr_alloc_flags & ESP_INTR_FLAG_IRAM) == 0, "ESP_INTR_FLAG_IRAM set in intr_alloc_flags", ESP_FAIL); /* uart_rx_intr_handler_default is not in IRAM */
+
     if(p_uart_obj[uart_num] == NULL) {
         p_uart_obj[uart_num] = (uart_obj_t*) malloc(sizeof(uart_obj_t));
         if(p_uart_obj[uart_num] == NULL) {
@@ -1017,9 +1056,8 @@ esp_err_t uart_driver_install(uart_port_t uart_num, int rx_buffer_size, int tx_b
         return ESP_FAIL;
     }
 
-    assert((intr_alloc_flags & ESP_INTR_FLAG_IRAM) == 0); /* uart_rx_intr_handler_default is not in IRAM */
-
-    uart_isr_register(uart_num, uart_rx_intr_handler_default, p_uart_obj[uart_num], intr_alloc_flags, &p_uart_obj[uart_num]->intr_handle);
+    r=uart_isr_register(uart_num, uart_rx_intr_handler_default, p_uart_obj[uart_num], intr_alloc_flags, &p_uart_obj[uart_num]->intr_handle);
+    if (r!=ESP_OK) goto err;
     uart_intr_config_t uart_intr = {
         .intr_enable_mask = UART_RXFIFO_FULL_INT_ENA_M
                             | UART_RXFIFO_TOUT_INT_ENA_M
@@ -1031,8 +1069,13 @@ esp_err_t uart_driver_install(uart_port_t uart_num, int rx_buffer_size, int tx_b
         .rx_timeout_thresh = UART_TOUT_THRESH_DEFAULT,
         .txfifo_empty_intr_thresh = UART_EMPTY_THRESH_DEFAULT
     };
-    uart_intr_config(uart_num, &uart_intr);
-    return ESP_OK;
+    r=uart_intr_config(uart_num, &uart_intr);
+    if (r!=ESP_OK) goto err;
+    return r;
+
+err:
+    uart_driver_delete(uart_num);
+    return r;
 }
 
 //Make sure no other tasks are still using UART before you call this function

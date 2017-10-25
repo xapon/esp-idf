@@ -277,6 +277,25 @@ rtc_fast_freq_t rtc_clk_fast_freq_get();
 void rtc_clk_cpu_freq_set(rtc_cpu_freq_t cpu_freq);
 
 /**
+ * @brief Switch CPU frequency
+ *
+ * This is a faster version of rtc_clk_cpu_freq_set, which can handle some of
+ * the frequency switch paths (XTAL -> PLL, PLL -> XTAL).
+ * When switching from PLL to XTAL, PLL is not disabled (unlike rtc_clk_cpu_freq_set).
+ * When switching back from XTAL to PLL, only the same PLL can be used.
+ * Therefore it is not possible to switch 240 -> XTAL -> (80 or 160) using this
+ * function.
+ *
+ * For unsupported cases, this function falls back to rtc_clk_cpu_freq_set.
+ *
+ * Unlike rtc_clk_cpu_freq_set, this function relies on static data, so it is
+ * less safe to use it e.g. from a panic handler (when memory might be corrupted).
+ *
+ * @param cpu_freq  new CPU frequency
+ */
+void rtc_clk_cpu_freq_set_fast(rtc_cpu_freq_t cpu_freq);
+
+/**
  * @brief Get the currently selected CPU frequency
  *
  * Although CPU can be clocked by APLL and RTC 8M sources, such support is not
@@ -295,6 +314,14 @@ rtc_cpu_freq_t rtc_clk_cpu_freq_get();
  * @return CPU frequency, in HZ
  */
 uint32_t rtc_clk_cpu_freq_value(rtc_cpu_freq_t cpu_freq);
+
+/**
+ * @brief Get rtc_cpu_freq_t enum value for given CPU frequency
+ * @param cpu_freq_mhz  CPU frequency, one of 80, 160, 240, 2, and XTAL frequency
+ * @param[out] out_val output, rtc_cpu_freq_t value corresponding to the frequency
+ * @return true if the given frequency value matches one of enum values
+ */
+ bool rtc_clk_cpu_freq_from_mhz(int cpu_freq_mhz, rtc_cpu_freq_t* out_val);
 
 /**
  * @brief Store new APB frequency value into RTC_APB_FREQ_REG
@@ -393,6 +420,7 @@ typedef struct {
     uint32_t rtc_dbias_wak : 3;         //!< set bias for RTC domain, in active mode
     uint32_t rtc_dbias_slp : 3;         //!< set bias for RTC domain, in sleep mode
     uint32_t lslp_meminf_pd : 1;        //!< remove all peripheral force power up flags
+    uint32_t vddsdio_pd_en : 1;         //!< power down VDDSDIO regulator
 } rtc_sleep_config_t;
 
 /**
@@ -419,7 +447,8 @@ typedef struct {
     .dig_dbias_slp = RTC_CNTL_DBIAS_0V90, \
     .rtc_dbias_wak = RTC_CNTL_DBIAS_0V90, \
     .rtc_dbias_slp = RTC_CNTL_DBIAS_0V90, \
-    .lslp_meminf_pd = 1 \
+    .lslp_meminf_pd = 1, \
+    .vddsdio_pd_en = ((sleep_flags) & RTC_SLEEP_PD_VDDSDIO) ? 1 : 0, \
 };
 
 #define RTC_SLEEP_PD_DIG                BIT(0)  //!< Deep sleep (power down digital domain)
@@ -427,6 +456,7 @@ typedef struct {
 #define RTC_SLEEP_PD_RTC_SLOW_MEM       BIT(2)  //!< Power down RTC SLOW memory
 #define RTC_SLEEP_PD_RTC_FAST_MEM       BIT(3)  //!< Power down RTC FAST memory
 #define RTC_SLEEP_PD_RTC_MEM_FOLLOW_CPU BIT(4)  //!< RTC FAST and SLOW memories are automatically powered up and down along with the CPU
+#define RTC_SLEEP_PD_VDDSDIO            BIT(5)  //!< Power down VDDSDIO regulator
 
 /**
  * @brief Prepare the chip to enter sleep mode

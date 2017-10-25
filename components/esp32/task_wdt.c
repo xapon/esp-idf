@@ -131,7 +131,7 @@ void esp_task_wdt_feed() {
         TIMERG0.wdt_feed=1;
         TIMERG0.wdt_wprotect=0;
         //Reset fed_watchdog status
-        for (wdttask=wdt_task_list; wdttask->next!=NULL; wdttask=wdttask->next) wdttask->fed_watchdog=false;
+        for (wdttask=wdt_task_list; wdttask!=NULL; wdttask=wdttask->next) wdttask->fed_watchdog=false;
     }
     portEXIT_CRITICAL(&taskwdt_spinlock);
 }
@@ -202,7 +202,7 @@ void esp_task_wdt_init() {
 #if CONFIG_TASK_WDT_CHECK_IDLE_TASK
     esp_register_freertos_idle_hook(idle_hook);
 #endif
-    esp_intr_alloc(ETS_TG0_WDT_LEVEL_INTR_SOURCE, 0, task_wdt_isr, NULL, NULL);
+    ESP_ERROR_CHECK( esp_intr_alloc(ETS_TG0_WDT_LEVEL_INTR_SOURCE, 0, task_wdt_isr, NULL, NULL) );
 }
 
 
