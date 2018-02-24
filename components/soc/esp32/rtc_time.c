@@ -151,3 +151,4 @@ void rtc_clk_wait_for_slow_cycle()
         ets_delay_us(1);
     }
 }
+

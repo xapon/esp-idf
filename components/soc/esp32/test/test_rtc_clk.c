@@ -122,3 +122,4 @@ TEST_CASE("Test fast switching between PLL and XTAL", "[rtc_clk]")
     test_clock_switching(rtc_clk_cpu_freq_set_fast);
 }
 
+
